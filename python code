@@ -1,1 +1,82 @@
+# SPDX-FileCopyrightText: 2021 ladyada for Adafruit Industries
+# SPDX-License-Identifier: MIT
+
+import cv2
+import numpy as np
+import board
+import busio
+import adafruit_amg88xx
+from scipy.interpolate import griddata
+
+# Setup I2C and AMG8833 sensor
+i2c_bus = busio.I2C(board.SCL, board.SDA)
+sensor = adafruit_amg88xx.AMG88XX(i2c_bus)
+
+# Constants
+MINTEMP = 26.0
+MAXTEMP = 32.0
+DETECTION_THRESHOLD_C = 33.0
+DISPLAY_WIDTH, DISPLAY_HEIGHT = 640, 640
+INTERPOLATED_SIZE = 32
+
+# Interpolation grid
+points = [(i // 8, i % 8) for i in range(64)]
+grid_x, grid_y = np.mgrid[0:7:INTERPOLATED_SIZE*1j, 0:7:INTERPOLATED_SIZE*1j]
+
+def map_value(x, in_min, in_max, out_min, out_max):
+    return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
+
+while True:
+    # Read thermal data
+    pixels = []
+    for row in sensor.pixels:
+        pixels += row
+    avg_temp = sum(pixels) / len(pixels)
+
+    # Interpolate original temperature values (not mapped)
+    interp_temp = griddata(points, pixels, (grid_x, grid_y), method='cubic')
+    interp_temp = np.nan_to_num(interp_temp)
+
+    # Create visual version of data
+    mapped_pixels = np.clip(map_value(interp_temp, MINTEMP, MAXTEMP, 0, 255), 0, 255)
+    thermal_image = np.uint8(mapped_pixels)
+    colored_image = cv2.applyColorMap(thermal_image, cv2.COLORMAP_JET)
+    colored_image = cv2.resize(colored_image, (DISPLAY_WIDTH, DISPLAY_HEIGHT), interpolation=cv2.INTER_CUBIC)
+
+    # Hotspot detection from real temperature data
+    hotspot_mask = interp_temp > DETECTION_THRESHOLD_C
+    hotspot_uint8 = (hotspot_mask * 255).astype(np.uint8)
+    hotspot_uint8 = cv2.resize(hotspot_uint8, (DISPLAY_WIDTH, DISPLAY_HEIGHT), interpolation=cv2.INTER_NEAREST)
+
+    contours, _ = cv2.findContours(hotspot_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area > 200:
+            x, y, w, h = cv2.boundingRect(cnt)
+            cv2.rectangle(colored_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+    # Determine status
+    if avg_temp > 30:
+        condition = "High Temp"
+        color = (0, 0, 255)
+    elif avg_temp < 10:
+        condition = "Low Temp"
+        color = (255, 0, 0)
+    else:
+        condition = "Normal"
+        color = (0, 255, 0)
+
+    # Info overlay
+    cv2.rectangle(colored_image, (0, DISPLAY_HEIGHT - 50), (DISPLAY_WIDTH, DISPLAY_HEIGHT), (40, 40, 40), -1)
+    cv2.putText(colored_image, f"Avg Temp: {avg_temp:.1f}C", (10, DISPLAY_HEIGHT - 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    cv2.putText(colored_image, f"Status: {condition}", (DISPLAY_WIDTH - 220, DISPLAY_HEIGHT - 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+    # Show result
+    cv2.imshow("Thermal Camera - AMG8833", colored_image)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cv2.destroyAllWindows()
 
